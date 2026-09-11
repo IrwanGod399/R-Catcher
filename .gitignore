@@ -1,0 +1,19 @@
+# Folder Cache Visual Studio
+.vs/
+
+# Folder hasil Build (kompilasi)
+[Bb]in/
+[Dd]ebug/
+[Rr]elease/
+x64/
+Win32/
+
+# File spesifik pengguna Visual Studio
+*.suo
+*.user
+
+# File sementara hasil kompilasi
+*.obj
+*.pdb
+*.ilk
+*.pch
