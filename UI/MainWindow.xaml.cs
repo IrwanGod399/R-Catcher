@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
@@ -430,6 +431,160 @@ namespace UI
             lblEventCount.Text = "0";
         }
 
+        //  Buat baseline: minta kernel merekam SEMUA proses aktif (NT path lengkapnya)
+        //  ke whitelist, selama durasi (detik) yang diinput user. Kernel yang meng-enumerate,
+        //  jadi proses sistem terproteksi pun ikut tertangkap.
+        private async void btnBaseline_Click(object sender, RoutedEventArgs e)
+        {
+            if (!EnsurePortConnected())
+            {
+                MessageBox.Show("Hubungkan driver terlebih dahulu via tombol gear (⚙).");
+                return;
+            }
+
+            //  Baca durasi dari input (default 15 detik, dibatasi 1..300)
+            if (!int.TryParse(txtBaselineDuration.Text.Trim(), out int durationSec) || durationSec < 1)
+                durationSec = 15;
+            if (durationSec > 300) durationSec = 300;
+
+            btnBaseline.IsEnabled = false;
+            txtBaselineDuration.IsEnabled = false;
+            statusIndicator.Fill = new SolidColorBrush(Color.FromRgb(234, 179, 8)); // kuning: sedang merekam
+
+            try
+            {
+                //  Reset baseline lama
+                await Task.Run(() => SendKernelCommand(DriverBridge.COMMAND_CLEAR_WHITELIST, string.Empty));
+
+                //  Rekam terus-menerus: kirim snapshot tiap 1 detik selama durasi.
+                //  Kernel meng-enumerate proses & dedup, jadi proses baru yang muncul
+                //  di tengah periode ikut tertangkap.
+                for (int elapsed = 0; elapsed < durationSec; elapsed++)
+                {
+                    await Task.Run(() => SendKernelCommand(DriverBridge.COMMAND_CAPTURE_BASELINE, string.Empty));
+                    lblStatus.Text = string.Format("Merekam baseline... {0}/{1} detik", elapsed + 1, durationSec);
+                    await Task.Delay(1000);
+                }
+
+                //  Snapshot terakhir (tangkap proses yang muncul di detik pamungkas)
+                await Task.Run(() => SendKernelCommand(DriverBridge.COMMAND_CAPTURE_BASELINE, string.Empty));
+
+                int captured = GetWhitelistFromKernel().Count;
+                lblStatus.Text = "Baseline selesai — " + captured + " proses tepercaya masuk whitelist.";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Gagal membuat baseline: " + ex.Message);
+                lblStatus.Text = "Error saat membuat baseline.";
+            }
+            finally
+            {
+                btnBaseline.IsEnabled = true;
+                txtBaselineDuration.IsEnabled = true;
+                statusIndicator.Fill = new SolidColorBrush(Color.FromRgb(100, 116, 139)); // abu: standby
+            }
+        }
+
+        //  Ambil isi whitelist dari kernel & tampilkan di jendela popup.
+        private void btnViewWhitelist_Click(object sender, RoutedEventArgs e)
+        {
+            if (!EnsurePortConnected())
+            {
+                MessageBox.Show("Hubungkan driver terlebih dahulu via tombol gear (⚙).");
+                return;
+            }
+
+            List<string> paths = GetWhitelistFromKernel();
+            lblStatus.Text = "Whitelist berisi " + paths.Count + " proses tepercaya.";
+            ShowWhitelistWindow(paths);
+        }
+
+        //  Kirim COMMAND_GET_WHITELIST, parse balasannya menjadi daftar NT path.
+        //  Format tiap entri dari kernel: [int cbBytes][cbBytes WCHAR path].
+        private List<string> GetWhitelistFromKernel()
+        {
+            var result = new List<string>();
+
+            int outSize = 512 * 1024;
+            IntPtr outBuffer = Marshal.AllocHGlobal(outSize);
+            IntPtr pCmd = Marshal.AllocHGlobal(sizeof(uint));
+            Marshal.WriteInt32(pCmd, (int)DriverBridge.COMMAND_GET_WHITELIST);
+
+            try
+            {
+                uint bytesReturned = 0;
+                int hResult = DriverBridge.FilterSendMessage(
+                    hPort, pCmd, sizeof(uint), outBuffer, (uint)outSize, out bytesReturned);
+
+                if (hResult == 0 && bytesReturned > 0)
+                {
+                    int offset = 0;
+                    while (offset + 4 <= bytesReturned)
+                    {
+                        int cb = Marshal.ReadInt32(outBuffer, offset);
+                        offset += 4;
+                        if (cb <= 0 || offset + cb > bytesReturned)
+                            break;
+
+                        string path = Marshal.PtrToStringUni(
+                            new IntPtr(outBuffer.ToInt64() + offset), cb / 2);
+                        if (!string.IsNullOrEmpty(path))
+                            result.Add(path);
+
+                        offset += cb;
+                    }
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(outBuffer);
+                Marshal.FreeHGlobal(pCmd);
+            }
+
+            //  Konversi NT path -> DOS path (C:\...) agar lebih mudah dibaca; kalau gagal, tampilkan apa adanya
+            var display = new List<string>();
+            foreach (var nt in result)
+            {
+                string dos = DriverBridge.ConvertNtPathToDosPath(nt);
+                display.Add(string.IsNullOrEmpty(dos) ? nt : dos);
+            }
+            display.Sort(StringComparer.OrdinalIgnoreCase);
+            return display;
+        }
+
+        //  Jendela popup berisi daftar whitelist (bertema gelap, bisa scroll).
+        private void ShowWhitelistWindow(List<string> paths)
+        {
+            var win = new Window
+            {
+                Title = "Baseline Whitelist — " + paths.Count + " proses tepercaya",
+                Width = 820,
+                Height = 520,
+                Owner = this,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Background = new SolidColorBrush(Color.FromRgb(14, 15, 18))
+            };
+
+            var lb = new ListBox
+            {
+                Background = new SolidColorBrush(Color.FromRgb(20, 22, 31)),
+                Foreground = new SolidColorBrush(Color.FromRgb(226, 232, 240)),
+                BorderThickness = new Thickness(0),
+                FontSize = 12,
+                FontFamily = new FontFamily("Consolas"),
+                Margin = new Thickness(12),
+                HorizontalContentAlignment = HorizontalAlignment.Stretch
+            };
+
+            if (paths.Count == 0)
+                lb.Items.Add("(Whitelist kosong — buat baseline dulu dengan tombol 🛡 Baseline)");
+            else
+                foreach (var p in paths) lb.Items.Add(p);
+
+            win.Content = lb;
+            win.ShowDialog();
+        }
+
         private void txtFilter_TextChanged(object sender, TextChangedEventArgs e)
         {
             string query = txtFilter.Text.Trim().ToLower();
@@ -586,6 +741,9 @@ namespace UI
         public const uint COMMAND_ADD_TARGET = 3;
         public const uint COMMAND_START_MONITORING = 4;
         public const uint COMMAND_STOP_MONITORING = 5;
+        public const uint COMMAND_CLEAR_WHITELIST = 6;
+        public const uint COMMAND_CAPTURE_BASELINE = 7;
+        public const uint COMMAND_GET_WHITELIST = 8;
 
         [DllImport("fltlib.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern int FilterConnectCommunicationPort(

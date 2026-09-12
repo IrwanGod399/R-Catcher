@@ -188,7 +188,10 @@ typedef enum _MINISPY_COMMAND {
     COMMAND_CLEAR_TARGETS,      // <--- Tambahan Baru
     COMMAND_ADD_TARGET,         // <--- Tambahan Baru
     COMMAND_START_MONITORING,   // <--- Aktifkan proteksi kernel (dipicu tombol Start)
-    COMMAND_STOP_MONITORING     // <--- Matikan proteksi kernel (dipicu tombol Stop)
+    COMMAND_STOP_MONITORING,    // <--- Matikan proteksi kernel (dipicu tombol Stop)
+    COMMAND_CLEAR_WHITELIST,    // <--- Kosongkan baseline/whitelist proses
+    COMMAND_CAPTURE_BASELINE,   // <--- Kernel enumerasi semua proses aktif -> masuk whitelist
+    COMMAND_GET_WHITELIST       // <--- Kirim isi whitelist ke UI untuk ditampilkan
 } MINISPY_COMMAND;
 
 // Struktur pesan untuk mengirim target dari User ke Kernel

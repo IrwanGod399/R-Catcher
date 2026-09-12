@@ -31,6 +31,38 @@ FAST_MUTEX g_TargetListLock;
 
 // Flag proteksi kernel. FALSE saat driver baru dimuat (belum di-Start dari UI).
 volatile BOOLEAN g_MonitoringActive = FALSE;
+
+// Whitelist dinamis (baseline). Node = TARGET_ENTRY (ListEntry + UNICODE_STRING).
+LIST_ENTRY g_WhitelistHead;
+FAST_MUTEX g_WhitelistLock;
+
+//---------------------------------------------------------------------------
+//  Deklarasi untuk enumerasi proses (baseline) di kernel
+//---------------------------------------------------------------------------
+#define SystemProcessInformation 5
+
+typedef struct _SPY_SYSTEM_PROCESS_INFORMATION {
+    ULONG NextEntryOffset;
+    ULONG NumberOfThreads;
+    LARGE_INTEGER Reserved1[3];
+    LARGE_INTEGER CreateTime;
+    LARGE_INTEGER UserTime;
+    LARGE_INTEGER KernelTime;
+    UNICODE_STRING ImageName;
+    KPRIORITY BasePriority;
+    HANDLE UniqueProcessId;
+    HANDLE InheritedFromUniqueProcessId;
+    // ... field lain tidak dipakai
+} SPY_SYSTEM_PROCESS_INFORMATION, * PSPY_SYSTEM_PROCESS_INFORMATION;
+
+NTSTATUS
+ZwQuerySystemInformation(
+    _In_ ULONG SystemInformationClass,
+    _Inout_ PVOID SystemInformation,
+    _In_ ULONG SystemInformationLength,
+    _Out_opt_ PULONG ReturnLength
+);
+
 //---------------------------------------------------------------------------
 //  Function prototypes
 //---------------------------------------------------------------------------
@@ -79,6 +111,9 @@ CoreSentinelWorkItemRoutine(
 );
 VOID ClearTargetList(VOID);
 NTSTATUS AddTargetToList(WCHAR* PathBuffer);
+VOID ClearWhitelist(VOID);
+NTSTATUS AddWhitelistEntry(_In_ PUNICODE_STRING Path);
+VOID CaptureBaseline(VOID);
 //---------------------------------------------------------------------------
 //  Assign text sections for each routine.
 //---------------------------------------------------------------------------
@@ -147,6 +182,8 @@ Return Value:
         KeInitializeSpinLock( &MiniSpyData.OutputBufferLock );
         InitializeListHead(&g_TargetListHead);
         ExInitializeFastMutex(&g_TargetListLock);
+        InitializeListHead(&g_WhitelistHead);
+        ExInitializeFastMutex(&g_WhitelistLock);
         ExInitializeNPagedLookasideList( &MiniSpyData.FreeBufferList,
                                          NULL,
                                          NULL,
@@ -360,6 +397,10 @@ Return Value:
     SpyEmptyOutputBufferList();
     ExDeleteNPagedLookasideList( &MiniSpyData.FreeBufferList );
 
+    //  Bebaskan memori target list & whitelist agar tidak bocor saat unload.
+    ClearTargetList();
+    ClearWhitelist();
+
     return STATUS_SUCCESS;
 }
 
@@ -528,6 +569,67 @@ Return Value:
                 DbgPrint("CoreSentinel: Monitoring NONAKTIF (proteksi OFF).\n");
                 status = STATUS_SUCCESS;
                 break;
+
+            case COMMAND_CLEAR_WHITELIST:
+                // Reset baseline sebelum mulai merekam yang baru.
+                ClearWhitelist();
+                DbgPrint("CoreSentinel: Whitelist di-clear.\n");
+                status = STATUS_SUCCESS;
+                break;
+
+            case COMMAND_CAPTURE_BASELINE:
+                // Enumerasi semua proses aktif -> tambahkan NT path-nya ke whitelist.
+                // UI memanggil ini berulang selama periode baseline.
+                CaptureBaseline();
+                status = STATUS_SUCCESS;
+                break;
+
+            case COMMAND_GET_WHITELIST:
+            {
+                //  Kirim isi whitelist ke UI. Format per entri: [ULONG cbBytes][cbBytes WCHAR path].
+                PUCHAR temp;
+                ULONG off = 0;
+                PLIST_ENTRY we;
+
+                if ((OutputBuffer == NULL) || (OutputBufferSize == 0)) {
+                    status = STATUS_INVALID_PARAMETER;
+                    break;
+                }
+
+                //  Susun ke buffer kernel dulu (di bawah lock), baru copy ke user.
+                temp = (PUCHAR)ExAllocatePoolZero(NonPagedPool, OutputBufferSize, 'wlGM');
+                if (!temp) {
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    break;
+                }
+
+                ExAcquireFastMutex(&g_WhitelistLock);
+                we = g_WhitelistHead.Flink;
+                while (we != &g_WhitelistHead) {
+                    PTARGET_ENTRY wl = CONTAINING_RECORD(we, TARGET_ENTRY, ListEntry);
+                    ULONG cb = wl->FileName.Length;
+                    if (off + sizeof(ULONG) + cb > OutputBufferSize) {
+                        break;  // sisa tidak muat, hentikan
+                    }
+                    RtlCopyMemory(temp + off, &cb, sizeof(ULONG));
+                    off += sizeof(ULONG);
+                    RtlCopyMemory(temp + off, wl->FileName.Buffer, cb);
+                    off += cb;
+                    we = we->Flink;
+                }
+                ExReleaseFastMutex(&g_WhitelistLock);
+
+                try {
+                    RtlCopyMemory(OutputBuffer, temp, off);
+                    *ReturnOutputBufferLength = off;
+                    status = STATUS_SUCCESS;
+                } except(SpyExceptionFilter(GetExceptionInformation(), TRUE)) {
+                    status = GetExceptionCode();
+                }
+
+                ExFreePool(temp);
+                break;
+            }
 
             case GetMiniSpyLog:
 
@@ -717,6 +819,123 @@ NTSTATUS AddTargetToList(WCHAR* PathBuffer) {
     return STATUS_SUCCESS;
 }
 
+// =============================================================
+// ==            WHITELIST / BASELINE (di kernel)             ==
+// =============================================================
+
+// Kosongkan seluruh whitelist.
+VOID ClearWhitelist(VOID) {
+    PLIST_ENTRY entry;
+    PTARGET_ENTRY item;
+
+    ExAcquireFastMutex(&g_WhitelistLock);
+    while (!IsListEmpty(&g_WhitelistHead)) {
+        entry = RemoveHeadList(&g_WhitelistHead);
+        item = CONTAINING_RECORD(entry, TARGET_ENTRY, ListEntry);
+        if (item->FileName.Buffer) {
+            ExFreePool(item->FileName.Buffer);
+        }
+        ExFreePool(item);
+    }
+    ExReleaseFastMutex(&g_WhitelistLock);
+}
+
+// Tambah satu NT path ke whitelist (dengan dedup). Aman dipanggil berulang.
+NTSTATUS AddWhitelistEntry(_In_ PUNICODE_STRING Path) {
+    PTARGET_ENTRY newEntry;
+    PLIST_ENTRY e;
+
+    if (Path == NULL || Path->Length == 0 || Path->Buffer == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    ExAcquireFastMutex(&g_WhitelistLock);
+
+    //  Dedup: kalau path sudah ada, tidak usah ditambah lagi.
+    e = g_WhitelistHead.Flink;
+    while (e != &g_WhitelistHead) {
+        PTARGET_ENTRY w = CONTAINING_RECORD(e, TARGET_ENTRY, ListEntry);
+        if (RtlCompareUnicodeString(Path, &w->FileName, TRUE) == 0) {
+            ExReleaseFastMutex(&g_WhitelistLock);
+            return STATUS_SUCCESS;
+        }
+        e = e->Flink;
+    }
+
+    //  Alokasi node + buffer string (NonPagedPool aman di APC_LEVEL/FAST_MUTEX).
+    newEntry = (PTARGET_ENTRY)ExAllocatePoolZero(NonPagedPool, sizeof(TARGET_ENTRY), 'wtT1');
+    if (!newEntry) {
+        ExReleaseFastMutex(&g_WhitelistLock);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    newEntry->FileName.Buffer = (PWCH)ExAllocatePoolZero(NonPagedPool, Path->Length + sizeof(WCHAR), 'wtT2');
+    if (!newEntry->FileName.Buffer) {
+        ExFreePool(newEntry);
+        ExReleaseFastMutex(&g_WhitelistLock);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    newEntry->FileName.Length = Path->Length;
+    newEntry->FileName.MaximumLength = Path->Length + sizeof(WCHAR);
+    RtlCopyMemory(newEntry->FileName.Buffer, Path->Buffer, Path->Length);
+
+    InsertTailList(&g_WhitelistHead, &newEntry->ListEntry);
+    ExReleaseFastMutex(&g_WhitelistLock);
+    return STATUS_SUCCESS;
+}
+
+// Enumerasi SEMUA proses aktif dan masukkan NT path lengkapnya ke whitelist.
+// Kernel bisa membaca path proses terproteksi sekalipun (beda dgn userspace).
+VOID CaptureBaseline(VOID) {
+    NTSTATUS status;
+    ULONG bufLen = 0;
+    PVOID buffer = NULL;
+    PSPY_SYSTEM_PROCESS_INFORMATION spi;
+
+    //  1. Tanya ukuran buffer yang dibutuhkan.
+    status = ZwQuerySystemInformation(SystemProcessInformation, NULL, 0, &bufLen);
+    if (bufLen == 0) {
+        return;
+    }
+    bufLen += 8192;  // slack untuk proses yang muncul di antara dua panggilan
+
+    buffer = ExAllocatePoolZero(NonPagedPool, bufLen, 'lbSM');
+    if (!buffer) {
+        return;
+    }
+
+    //  2. Ambil daftar proses.
+    status = ZwQuerySystemInformation(SystemProcessInformation, buffer, bufLen, &bufLen);
+    if (!NT_SUCCESS(status)) {
+        ExFreePool(buffer);
+        return;
+    }
+
+    //  3. Iterasi tiap proses -> ambil NT path lengkap -> masuk whitelist.
+    spi = (PSPY_SYSTEM_PROCESS_INFORMATION)buffer;
+    for (;;) {
+        if (spi->UniqueProcessId != NULL) {
+            PEPROCESS proc = NULL;
+            if (NT_SUCCESS(PsLookupProcessByProcessId(spi->UniqueProcessId, &proc))) {
+                PUNICODE_STRING imgPath = NULL;
+                if (NT_SUCCESS(SeLocateProcessImageName(proc, &imgPath)) && imgPath != NULL) {
+                    if (imgPath->Length > 0) {
+                        AddWhitelistEntry(imgPath);
+                    }
+                    ExFreePool(imgPath);
+                }
+                ObDereferenceObject(proc);
+            }
+        }
+
+        if (spi->NextEntryOffset == 0) {
+            break;
+        }
+        spi = (PSPY_SYSTEM_PROCESS_INFORMATION)((PUCHAR)spi + spi->NextEntryOffset);
+    }
+
+    ExFreePool(buffer);
+}
+
 FLT_PREOP_CALLBACK_STATUS
 #pragma warning(suppress: 6262)
 SpyPreOperationCallback(
@@ -791,21 +1010,42 @@ SpyPreOperationCallback(
                     PCHAR imageName = (PCHAR)PsGetProcessImageFileName(pProcess);
 
                     if (imageName) {
-                        // Simpan nama proses sebelum proses dimatikan
+                        // Simpan nama proses (untuk log) sebelum proses dimatikan
                         RtlStringCbCopyA(capturedName, sizeof(capturedName), imageName);
+                    }
 
-                        const CHAR* processWhitelist[] = { "explorer.exe", "SearchProtocol", "minispy.exe", "System" };
-                        ULONG whitelistCount = sizeof(processWhitelist) / sizeof(processWhitelist[0]);
-                        ANSI_STRING ansiImageName;
-                        RtlInitAnsiString(&ansiImageName, imageName);
+                    //  Whitelist DINAMIS: cocokkan NT PATH LENGKAP proses (mis.
+                    //  \Device\HarddiskVolume2\...\chrome.exe) dengan baseline yang direkam.
+                    {
+                        PUNICODE_STRING procImagePath = NULL;
+                        NTSTATUS pathStatus = SeLocateProcessImageName(pProcess, &procImagePath);
 
-                        for (ULONG i = 0; i < whitelistCount; i++) {
-                            ANSI_STRING ansiWhitelistEntry;
-                            RtlInitAnsiString(&ansiWhitelistEntry, processWhitelist[i]);
-                            if (RtlEqualString(&ansiImageName, &ansiWhitelistEntry, TRUE)) {
-                                isWhitelisted = TRUE;
-                                break;
+                        if (NT_SUCCESS(pathStatus) && procImagePath != NULL && procImagePath->Length > 0) {
+
+                            //  Path bisa di-resolve -> cocokkan ke whitelist.
+                            //  Ada di baseline -> tepercaya; tidak ada -> ancaman (di-terminate).
+                            ExAcquireFastMutex(&g_WhitelistLock);
+                            PLIST_ENTRY we = g_WhitelistHead.Flink;
+                            while (we != &g_WhitelistHead) {
+                                PTARGET_ENTRY wl = CONTAINING_RECORD(we, TARGET_ENTRY, ListEntry);
+                                if (RtlCompareUnicodeString(procImagePath, &wl->FileName, TRUE) == 0) {
+                                    isWhitelisted = TRUE;
+                                    break;
+                                }
+                                we = we->Flink;
                             }
+                            ExReleaseFastMutex(&g_WhitelistLock);
+                        }
+                        else {
+                            //  Path TIDAK bisa di-resolve: ini proses kernel/System (PID<=4)
+                            //  atau I/O paging/cache-flush yang berjalan di konteks System.
+                            //  Bukan ransomware user-mode -> ANGGAP TEPERCAYA agar tidak
+                            //  salah blokir/terminate (System tidak boleh dimatikan).
+                            isWhitelisted = TRUE;
+                        }
+
+                        if (procImagePath != NULL) {
+                            ExFreePool(procImagePath);
                         }
                     }
 

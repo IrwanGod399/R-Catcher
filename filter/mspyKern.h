@@ -239,6 +239,12 @@ extern FAST_MUTEX g_TargetListLock;
 // Dikontrol tombol Start/Stop di UI. Default FALSE saat driver dimuat.
 extern volatile BOOLEAN g_MonitoringActive;
 
+// Whitelist dinamis: daftar NT path (mis. \Device\HarddiskVolume2\...\chrome.exe)
+// proses tepercaya, dibangun dari "baseline" (enumerasi proses aktif oleh kernel).
+// Node memakai struct TARGET_ENTRY yang sama (ListEntry + UNICODE_STRING FileName).
+extern LIST_ENTRY g_WhitelistHead;
+extern FAST_MUTEX g_WhitelistLock;
+
 // =============================================================
 // == TAMBAHAN BARU: STRUKTUR WORKER THREAD ==
 // =============================================================

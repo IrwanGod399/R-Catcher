@@ -105,6 +105,16 @@
                     <Button x:Name="btnStart" Content="▶" ToolTip="Start Real-time Interception" Style="{StaticResource PlayBtn}" Margin="0,0,6,0" Click="btnStart_Click"/>
                     <Button x:Name="btnStop" Content="⏹" ToolTip="Stop Monitoring" Style="{StaticResource StopBtn}" Margin="0,0,6,0" IsEnabled="False" Click="btnStop_Click"/>
                     <Button x:Name="btnClear" Content="🗑" ToolTip="Clear Logs Table" Style="{StaticResource IconBtn}" Margin="0,0,6,0" Click="btnClear_Click"/>
+
+                    <Rectangle Width="1" Height="24" Fill="#24283B" Margin="4,0,8,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="Baseline (s):" Foreground="#94A3B8" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <TextBox x:Name="txtBaselineDuration" Text="15" Width="46" Height="34" VerticalContentAlignment="Center"
+                             HorizontalContentAlignment="Center" Background="#1A1D29" Foreground="#FAFAFA"
+                             BorderBrush="#2A2D3A" BorderThickness="1" CaretBrush="#FFFFFF" Margin="0,0,6,0"/>
+                    <Button x:Name="btnBaseline" Content="🛡 Baseline" ToolTip="Rekam semua proses aktif menjadi whitelist selama N detik"
+                            Style="{StaticResource IconBtn}" Width="104" Height="34" Margin="0,0,6,0" Click="btnBaseline_Click"/>
+                    <Button x:Name="btnViewWhitelist" Content="📋 Whitelist" ToolTip="Tampilkan isi whitelist (proses tepercaya) saat ini"
+                            Style="{StaticResource IconBtn}" Width="106" Height="34" Margin="0,0,6,0" Click="btnViewWhitelist_Click"/>
                 </StackPanel>
 
                 <Rectangle Grid.Column="1" Width="1" Height="24" Fill="#24283B" Margin="4,0,12,0"/>
