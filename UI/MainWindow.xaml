@@ -48,6 +48,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
@@ -99,7 +100,7 @@
 
                 <StackPanel Grid.Column="0" Orientation="Horizontal">
                     <Button x:Name="btnLoad" Content="⚙" ToolTip="Load Minispy Minifilter Driver" Style="{StaticResource IconBtn}" Margin="0,0,6,0" Click="btnLoad_Click"/>
-                    <Button x:Name="btnDeploy" Content="📁" ToolTip="Deploy Bait Honeyfiles (C:\Honey)" Style="{StaticResource IconBtn}" Margin="0,0,6,0" Click="btnDeploy_Click"/>
+                    <Button x:Name="btnDeploy" Content="📁" ToolTip="Deploy Bait Honeyfiles ke folder terpilih" Style="{StaticResource IconBtn}" Margin="0,0,6,0" Click="btnDeploy_Click"/>
                     <Button x:Name="btnCleanBait" Content="🧹" ToolTip="Clear Kernel Targets &amp; Delete Bait Files" Style="{StaticResource IconBtn}" Margin="0,0,6,0" Click="btnCleanBait_Click"/>
                     <Button x:Name="btnStart" Content="▶" ToolTip="Start Real-time Interception" Style="{StaticResource PlayBtn}" Margin="0,0,6,0" Click="btnStart_Click"/>
                     <Button x:Name="btnStop" Content="⏹" ToolTip="Stop Monitoring" Style="{StaticResource StopBtn}" Margin="0,0,6,0" IsEnabled="False" Click="btnStop_Click"/>
@@ -123,8 +124,46 @@
             </Grid>
         </Border>
 
-        <!-- 3. Logs DataGrid (Hanya menampilkan kolom yang relevan) -->
-        <Border Grid.Row="2" Background="#14161F" CornerRadius="8" BorderBrush="#202433" BorderThickness="1" ClipToBounds="True">
+        <!-- 3. Target Folders Panel -->
+        <Border Grid.Row="2" Background="#14161F" CornerRadius="8" Padding="10" Margin="0,0,0,12" BorderBrush="#202433" BorderThickness="1">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0">
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                        <TextBlock Text="📂 TARGET FOLDERS" FontSize="10" FontWeight="Bold" Foreground="#64748B" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="lblFolderCount" Text="(0)" FontSize="10" FontWeight="Bold" Foreground="#38BDF8" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="— di dalamnya digenerate subfolder '1' &amp; 'z' berisi 25 honeyfile (ukuran acak)" FontSize="10" Foreground="#475569" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                    </StackPanel>
+
+                    <Border Background="#1A1D29" CornerRadius="6" BorderBrush="#24283B" BorderThickness="1">
+                        <ListBox x:Name="lstFolders" Height="70" Background="Transparent" BorderThickness="0"
+                                 Foreground="#E2E8F0" FontSize="12" ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="Padding" Value="6,3"/>
+                                    <Setter Property="Background" Value="Transparent"/>
+                                    <Setter Property="Foreground" Value="#CBD5E1"/>
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                        </ListBox>
+                    </Border>
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" VerticalAlignment="Bottom" Margin="10,0,0,0">
+                    <Button x:Name="btnBrowseFolder" Content="➕  Browse" ToolTip="Pilih folder tujuan honeyfile"
+                            Style="{StaticResource IconBtn}" Width="120" Height="32" Margin="0,0,0,6" Click="btnBrowseFolder_Click"/>
+                    <Button x:Name="btnRemoveFolder" Content="➖  Remove" ToolTip="Hapus folder terpilih dari daftar"
+                            Style="{StaticResource IconBtn}" Width="120" Height="32" Click="btnRemoveFolder_Click"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- 4. Logs DataGrid (Hanya menampilkan kolom yang relevan) -->
+        <Border Grid.Row="3" Background="#14161F" CornerRadius="8" BorderBrush="#202433" BorderThickness="1" ClipToBounds="True">
             <DataGrid x:Name="dgLogs" AutoGenerateColumns="False" 
                       Background="Transparent" RowBackground="#14161F" AlternatingRowBackground="#171A24"
                       Foreground="#E2E8F0" BorderThickness="0" HeadersVisibility="Column"
@@ -154,8 +193,8 @@
             </DataGrid>
         </Border>
 
-        <!-- 4. Status Bar Bawah -->
-        <Grid Grid.Row="3" Margin="4,8,4,0">
+        <!-- 5. Status Bar Bawah -->
+        <Grid Grid.Row="4" Margin="4,8,4,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
@@ -164,7 +203,7 @@
                 <Ellipse x:Name="statusIndicator" Width="8" Height="8" Fill="#64748B" Margin="0,0,8,0"/>
                 <TextBlock x:Name="lblStatus" Text="Standby" Foreground="#64748B" FontSize="11"/>
             </StackPanel>
-            <TextBlock Grid.Column="1" Text="Engine: minispy.exe | Bait: C:\Honey" Foreground="#475569" FontSize="11"/>
+            <TextBlock Grid.Column="1" Text="Engine: minispy.exe | Bait: folder terpilih" Foreground="#475569" FontSize="11"/>
         </Grid>
     </Grid>
 </Window>

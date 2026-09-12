@@ -235,6 +235,10 @@ typedef struct _TARGET_ENTRY {
 extern LIST_ENTRY g_TargetListHead;
 extern FAST_MUTEX g_TargetListLock;
 
+// Flag proteksi: TRUE = kernel aktif memblokir/terminate, FALSE = nonaktif (pause).
+// Dikontrol tombol Start/Stop di UI. Default FALSE saat driver dimuat.
+extern volatile BOOLEAN g_MonitoringActive;
+
 // =============================================================
 // == TAMBAHAN BARU: STRUKTUR WORKER THREAD ==
 // =============================================================

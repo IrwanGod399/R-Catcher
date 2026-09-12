@@ -2,6 +2,7 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -34,10 +35,184 @@ namespace UI
 
         private const string BAIT_PATH = @"C:\Honey";
 
+        //  Daftar folder tujuan tempat honeyfile ditanam (dipilih user via dialog Browse)
+        private ObservableCollection<string> targetFolders = new ObservableCollection<string>();
+
+        //  Definisi honeyfile (mengikuti konsep /g di mspyUser.c):
+        //  di tiap folder tujuan dibuat subfolder "1" & "z", masing-masing diisi
+        //  5 nama x 5 ekstensi = 25 honeyfile berukuran acak berbeda-beda.
+        private static readonly string[] HoneyBaseNames = { "passwords", "laporan_keuangan", "gaji_karyawan", "private_key", "backup_db" };
+        private static readonly string[] HoneyExts = { ".log", ".bin", ".docx", ".pdf", ".xlsx" };
+        private static readonly string[] HoneySubFolders = { "1", "z" };
+
+        //  Rentang ukuran honeyfile (byte): acak antara 4 KB s/d 256 KB
+        private const int HONEY_MIN_BYTES = 4 * 1024;
+        private const int HONEY_MAX_BYTES = 256 * 1024;
+
         public MainWindow()
         {
             InitializeComponent();
             dgLogs.ItemsSource = displayedLogs;
+            lstFolders.ItemsSource = targetFolders;
+
+            //  Folder tujuan default. Saat Deploy, di dalamnya digenerate subfolder "1" & "z".
+            //  Bisa dihapus lewat tombol Remove atau ditambah lewat Browse (mis. Documents).
+            targetFolders.Add(BAIT_PATH);
+            UpdateFolderCount();
+        }
+
+        private void UpdateFolderCount()
+        {
+            lblFolderCount.Text = "(" + targetFolders.Count + ")";
+        }
+
+        //  Tulis satu honeyfile berisi data berpola (byte = x % 255), sebesar sizeBytes.
+        //  Pola ini membuat file tampak punya struktur data (bukan kosong) — sama seperti /g.
+        private static void WriteHoneyfile(string path, int sizeBytes)
+        {
+            //  Kalau file lama sudah ber-atribut Hidden, WriteAllBytes akan gagal
+            //  ("Access denied"). Jadi normalkan atributnya dulu sebelum menulis ulang.
+            if (File.Exists(path))
+                File.SetAttributes(path, FileAttributes.Normal);
+
+            byte[] data = new byte[sizeBytes];
+            for (int x = 0; x < sizeBytes; x++)
+                data[x] = (byte)(x % 255);
+            File.WriteAllBytes(path, data);
+
+            //  Sembunyikan file supaya tidak terlihat/diklik user di Explorer.
+            File.SetAttributes(path, FileAttributes.Hidden);
+        }
+
+        //  Hapus semua honeyfile (subfolder "1" & "z") di dalam satu folder root.
+        //  Folder root (mis. Documents) TIDAK disentuh; subfolder "1"/"z" dihapus bila sudah kosong.
+        private static void DeleteHoneyfilesInFolder(string rootDir)
+        {
+            foreach (var sub in HoneySubFolders)
+            {
+                string subDir = Path.Combine(rootDir, sub);
+
+                foreach (var name in HoneyBaseNames)
+                {
+                    foreach (var ext in HoneyExts)
+                    {
+                        try
+                        {
+                            string fullPath = Path.Combine(subDir, name + ext);
+                            if (File.Exists(fullPath))
+                                File.Delete(fullPath);
+                        }
+                        catch { }
+                    }
+                }
+
+                try
+                {
+                    if (Directory.Exists(subDir) &&
+                        Directory.GetFileSystemEntries(subDir).Length == 0)
+                    {
+                        Directory.Delete(subDir, false);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        //  Sinkronkan daftar target di kernel dengan honeyfile yang MASIH ADA di folder-folder ini.
+        //  Karena kernel hanya punya "clear semua" + "add", kita clear lalu daftar ulang yang tersisa.
+        private void ResyncKernelTargets(string[] folders)
+        {
+            SendKernelCommand(DriverBridge.COMMAND_CLEAR_TARGETS, string.Empty);
+
+            foreach (var rootDir in folders)
+            {
+                foreach (var sub in HoneySubFolders)
+                {
+                    string subDir = Path.Combine(rootDir, sub);
+                    foreach (var name in HoneyBaseNames)
+                    {
+                        foreach (var ext in HoneyExts)
+                        {
+                            string fullPath = Path.Combine(subDir, name + ext);
+                            if (File.Exists(fullPath))
+                            {
+                                string ntPath = DriverBridge.ConvertDosPathToNtPath(fullPath);
+                                if (!string.IsNullOrEmpty(ntPath))
+                                    SendKernelCommand(DriverBridge.COMMAND_ADD_TARGET, ntPath);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        private void btnBrowseFolder_Click(object sender, RoutedEventArgs e)
+        {
+            using (var dlg = new System.Windows.Forms.FolderBrowserDialog())
+            {
+                dlg.Description = "Pilih folder tujuan tempat honeyfile akan ditanam";
+                dlg.ShowNewFolderButton = true;
+
+                if (dlg.SelectedPath == string.Empty && Directory.Exists(BAIT_PATH))
+                    dlg.SelectedPath = BAIT_PATH;
+
+                if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                {
+                    string chosen = dlg.SelectedPath;
+
+                    //  Cegah duplikat (case-insensitive)
+                    bool exists = false;
+                    foreach (var f in targetFolders)
+                    {
+                        if (string.Equals(f, chosen, StringComparison.OrdinalIgnoreCase))
+                        {
+                            exists = true;
+                            break;
+                        }
+                    }
+
+                    if (exists)
+                    {
+                        lblStatus.Text = "Folder sudah ada di daftar: " + chosen;
+                    }
+                    else
+                    {
+                        targetFolders.Add(chosen);
+                        UpdateFolderCount();
+                        lblStatus.Text = "Folder ditambahkan: " + chosen;
+                    }
+                }
+            }
+        }
+
+        private async void btnRemoveFolder_Click(object sender, RoutedEventArgs e)
+        {
+            if (!(lstFolders.SelectedItem is string selected))
+            {
+                lblStatus.Text = "Pilih dulu folder di daftar yang ingin dihapus.";
+                return;
+            }
+
+            string folderToRemove = selected;
+
+            //  1. Keluarkan dari daftar UI
+            targetFolders.Remove(folderToRemove);
+            UpdateFolderCount();
+            lblStatus.Text = "Menghapus honeyfile di: " + folderToRemove + " ...";
+
+            //  2. Snapshot folder yang tersisa (untuk resync kernel) + status port
+            string[] remaining = targetFolders.ToArray();
+            bool portOk = EnsurePortConnected();
+
+            //  3. Hapus honeyfile fisik folder itu + sinkronkan target kernel (di background)
+            await Task.Run(() =>
+            {
+                DeleteHoneyfilesInFolder(folderToRemove);
+                if (portOk)
+                    ResyncKernelTargets(remaining);
+            });
+
+            lblStatus.Text = "Folder dihapus & honeyfile-nya dibersihkan: " + folderToRemove;
         }
 
         private bool EnsurePortConnected()
@@ -90,52 +265,72 @@ namespace UI
                 return;
             }
 
-            lblStatus.Text = "Deploying honeyfiles...";
+            //  Snapshot daftar folder (ObservableCollection tidak thread-safe untuk Task.Run)
+            string[] folders = targetFolders.ToArray();
 
-            await Task.Run(() =>
+            if (folders.Length == 0)
             {
-                try
+                MessageBox.Show("Belum ada folder target. Tambahkan folder dulu lewat tombol Browse.");
+                return;
+            }
+
+            lblStatus.Text = "Deploying honeyfiles ke " + folders.Length + " folder...";
+
+            int deployedCount = await Task.Run(() =>
+            {
+                int count = 0;
+                var rnd = new Random();
+
+                foreach (var rootDir in folders)
                 {
-                    string[] folders = { "1", "z" };
-                    string[] files = { "passwords", "laporan_keuangan", "backup_db" };
-                    string[] exts = { ".docx", ".xlsx", ".pdf" };
-
-                    byte[] dummyData = new byte[1024];
-
-                    if (!Directory.Exists(BAIT_PATH))
-                        Directory.CreateDirectory(BAIT_PATH);
-
-                    foreach (var f in folders)
+                    try
                     {
-                        string targetDir = Path.Combine(BAIT_PATH, f);
-                        if (!Directory.Exists(targetDir))
-                            Directory.CreateDirectory(targetDir);
+                        if (!Directory.Exists(rootDir))
+                            Directory.CreateDirectory(rootDir);
 
-                        foreach (var name in files)
+                        //  Generate subfolder "1" dan "z" di dalam folder tujuan (konsep /g)
+                        foreach (var sub in HoneySubFolders)
                         {
-                            foreach (var ext in exts)
-                            {
-                                string fullPath = Path.Combine(targetDir, name + ext);
-                                File.WriteAllBytes(fullPath, dummyData);
+                            string subDir = Path.Combine(rootDir, sub);
+                            if (!Directory.Exists(subDir))
+                                Directory.CreateDirectory(subDir);
 
-                                string ntPath = DriverBridge.ConvertDosPathToNtPath(fullPath);
-                                if (!string.IsNullOrEmpty(ntPath))
+                            //  Sembunyikan subfolder bait ("1"/"z") juga (pertahankan flag Directory)
+                            try { File.SetAttributes(subDir, File.GetAttributes(subDir) | FileAttributes.Hidden); }
+                            catch { }
+
+                            //  25 honeyfile (5 nama x 5 ekstensi) per subfolder
+                            foreach (var name in HoneyBaseNames)
+                            {
+                                foreach (var ext in HoneyExts)
                                 {
-                                    SendKernelCommand(DriverBridge.COMMAND_ADD_TARGET, ntPath);
+                                    string fullPath = Path.Combine(subDir, name + ext);
+
+                                    //  Ukuran acak berbeda-beda tiap file (4 KB - 256 KB)
+                                    int sizeBytes = rnd.Next(HONEY_MIN_BYTES, HONEY_MAX_BYTES + 1);
+                                    WriteHoneyfile(fullPath, sizeBytes);
+
+                                    string ntPath = DriverBridge.ConvertDosPathToNtPath(fullPath);
+                                    if (!string.IsNullOrEmpty(ntPath))
+                                    {
+                                        SendKernelCommand(DriverBridge.COMMAND_ADD_TARGET, ntPath);
+                                        count++;
+                                    }
                                 }
                             }
                         }
                     }
+                    catch (Exception ex)
+                    {
+                        Dispatcher.Invoke(() => MessageBox.Show("Gagal membuat bait di " + rootDir + ": " + ex.Message));
+                    }
                 }
-                catch (Exception ex)
-                {
-                    Dispatcher.Invoke(() => MessageBox.Show("Gagal membuat bait: " + ex.Message));
-                }
+                return count;
             });
 
-            lblBaitStatus.Text = "Active (C:\\Honey)";
+            lblBaitStatus.Text = "Active (" + folders.Length + " folder)";
             lblBaitStatus.Foreground = new SolidColorBrush(Color.FromRgb(16, 185, 129));
-            lblStatus.Text = "Honeyfiles deployed & targets set";
+            lblStatus.Text = deployedCount + " honeyfile ditanam & target di-set ke kernel";
         }
 
         private async void btnCleanBait_Click(object sender, RoutedEventArgs e)
@@ -147,21 +342,18 @@ namespace UI
 
             lblStatus.Text = "Cleaning up honeyfiles...";
 
+            //  Snapshot daftar folder untuk dipakai di thread background
+            string[] folders = targetFolders.ToArray();
+
             await Task.Run(() =>
             {
-                try
-                {
-                    if (Directory.Exists(BAIT_PATH))
-                    {
-                        Directory.Delete(BAIT_PATH, true);
-                    }
-                }
-                catch { }
+                foreach (var rootDir in folders)
+                    DeleteHoneyfilesInFolder(rootDir);
             });
 
             lblBaitStatus.Text = "Cleared";
             lblBaitStatus.Foreground = new SolidColorBrush(Color.FromRgb(239, 68, 68));
-            lblStatus.Text = "All bait files deleted & targets cleared";
+            lblStatus.Text = "Honeyfile dihapus dari " + folders.Length + " folder & target kernel di-clear";
         }
 
         private void SendKernelCommand(uint commandCode, string targetPath)
@@ -200,8 +392,11 @@ namespace UI
             isMonitoring = true;
             cts = new CancellationTokenSource();
 
+            //  Aktifkan proteksi di kernel (mulai memblokir/terminate)
+            SendKernelCommand(DriverBridge.COMMAND_START_MONITORING, string.Empty);
+
             statusIndicator.Fill = new SolidColorBrush(Color.FromRgb(16, 185, 129));
-            lblStatus.Text = "Kernel Port Stream Active";
+            lblStatus.Text = "Kernel Port Stream Active | Proteksi ON";
 
             Task.Run(() => DirectKernelPortListener(cts.Token));
         }
@@ -215,10 +410,15 @@ namespace UI
                 cts = null;
             }
 
+            //  Matikan proteksi di kernel (berhenti memblokir/terminate).
+            //  Daftar honeyfile tetap tersimpan, jadi Start berikutnya cukup mengaktifkan lagi.
+            if (EnsurePortConnected())
+                SendKernelCommand(DriverBridge.COMMAND_STOP_MONITORING, string.Empty);
+
             btnStart.IsEnabled = true;
             btnStop.IsEnabled = false;
             statusIndicator.Fill = new SolidColorBrush(Color.FromRgb(239, 68, 68));
-            lblStatus.Text = "Monitoring Paused";
+            lblStatus.Text = "Monitoring Paused | Proteksi OFF";
         }
 
         private void btnClear_Click(object sender, RoutedEventArgs e)
@@ -275,94 +475,40 @@ namespace UI
                             if (recordLength <= 0 || (offset + recordLength) > bytesReturned)
                                 break;
 
-                            // 1. Ekstrak Target File Path (Unicode)
-                            string targetPath = string.Empty;
-                            int nameOffset = -1;
+                            // ===== Parsing record dengan OFFSET TETAP (layout LOG_RECORD, build x64) =====
+                            // Header 16 byte (Length/SequenceNumber/RecordType/Reserved) + RECORD_DATA.
+                            // Offset dihitung dari AWAL record:
+                            const int OFF_PROCESS_NAME = 56;   // CHAR[64]  ProcessName (ANSI)
+                            const int OFF_PROCESS_ID   = 120;  // FILE_ID   ProcessId   (8 byte)
+                            const int OFF_STATUS       = 144;  // NTSTATUS  Status      (4 byte)
+                            const int OFF_NAME         = 216;  // WCHAR[]   Name/path file (null-terminated)
 
-                            for (int n = 120; n < recordLength - 4; n += 2)
-                            {
-                                char c = (char)Marshal.ReadInt16(recordBase, n);
-                                if (c == '\\' || c == 'C' || c == 'D')
-                                {
-                                    IntPtr testNamePtr = new IntPtr(recordBase.ToInt64() + n);
-                                    string candidate = Marshal.PtrToStringUni(testNamePtr, (recordLength - n) / 2);
-                                    if (!string.IsNullOrEmpty(candidate))
-                                    {
-                                        int nullPos = candidate.IndexOf('\0');
-                                        if (nullPos > 0) candidate = candidate.Substring(0, nullPos);
-
-                                        if (candidate.Contains("\\") || candidate.IndexOf("Honey", StringComparison.OrdinalIgnoreCase) >= 0)
-                                        {
-                                            targetPath = candidate;
-                                            nameOffset = n;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-
-                            if (nameOffset == -1) nameOffset = 144;
-
-                            // 2. Ekstrak Status NTSTATUS
-                            uint status = 0;
-                            bool isBlocked = false;
-
-                            for (int s = 32; s < nameOffset; s += 4)
-                            {
-                                uint val = (uint)Marshal.ReadInt32(recordBase, s);
-                                if (val == 0xC0000022)
-                                {
-                                    status = 0xC0000022;
-                                    isBlocked = true;
-                                    break;
-                                }
-                            }
-
-                            if (status == 0)
-                            {
-                                status = (uint)Marshal.ReadInt32(recordBase, 40);
-                                if (status == 0) status = (uint)Marshal.ReadInt32(recordBase, 56);
-                            }
-
-                            // 3. Ekstrak ProcessName & PID (Format kernel: "PID|ProcessName")
-                            string rawProcessInfo = string.Empty;
-
-                            for (int p = 48; p < nameOffset - 4; p++)
-                            {
-                                byte b = Marshal.ReadByte(recordBase, p);
-                                if ((b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z'))
-                                {
-                                    IntPtr strPtr = new IntPtr(recordBase.ToInt64() + p);
-                                    string candidate = Marshal.PtrToStringAnsi(strPtr);
-                                    if (!string.IsNullOrEmpty(candidate))
-                                    {
-                                        int nullPos = candidate.IndexOf('\0');
-                                        if (nullPos > 0) candidate = candidate.Substring(0, nullPos);
-
-                                        if ((candidate.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || candidate.Contains("|")) && candidate.Length <= 40)
-                                        {
-                                            rawProcessInfo = candidate;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-
+                            // 1. PID — langsung dari field ProcessId (bukan lagi dari string "PID|nama")
                             string pidStr = "-";
-                            string processName = "<unknown>";
+                            long procId = Marshal.ReadInt64(recordBase, OFF_PROCESS_ID);
+                            if (procId > 0 && procId < 0xFFFFFFFF)
+                                pidStr = procId.ToString();
 
-                            if (!string.IsNullOrEmpty(rawProcessInfo))
+                            // 2. Nama proses — ANSI string di offset tetap, potong di NULL pertama
+                            string processName = Marshal.PtrToStringAnsi(
+                                new IntPtr(recordBase.ToInt64() + OFF_PROCESS_NAME), 64);
+                            int pnNul = processName.IndexOf('\0');
+                            if (pnNul >= 0) processName = processName.Substring(0, pnNul);
+                            if (string.IsNullOrEmpty(processName)) processName = "<unknown>";
+
+                            // 3. Status NTSTATUS — 4 byte di offset tetap
+                            uint status = (uint)Marshal.ReadInt32(recordBase, OFF_STATUS);
+                            bool isBlocked = (status == 0xC0000022);
+
+                            // 4. Path file target — WCHAR string mulai offset 216, potong di NULL pertama
+                            string targetPath = string.Empty;
+                            if (recordLength > OFF_NAME)
                             {
-                                if (rawProcessInfo.Contains("|"))
-                                {
-                                    string[] parts = rawProcessInfo.Split('|');
-                                    pidStr = parts[0].Trim();
-                                    processName = parts[1].Trim();
-                                }
-                                else
-                                {
-                                    processName = rawProcessInfo;
-                                }
+                                targetPath = Marshal.PtrToStringUni(
+                                    new IntPtr(recordBase.ToInt64() + OFF_NAME),
+                                    (recordLength - OFF_NAME) / 2);
+                                int tpNul = targetPath.IndexOf('\0');
+                                if (tpNul >= 0) targetPath = targetPath.Substring(0, tpNul);
                             }
 
                             // Konversi NT Path (\Device\HarddiskVolumeX\...) menjadi DOS Path (C:\...)
@@ -438,6 +584,8 @@ namespace UI
         public const uint GetMiniSpyLog = 0;
         public const uint COMMAND_CLEAR_TARGETS = 2;
         public const uint COMMAND_ADD_TARGET = 3;
+        public const uint COMMAND_START_MONITORING = 4;
+        public const uint COMMAND_STOP_MONITORING = 5;
 
         [DllImport("fltlib.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern int FilterConnectCommunicationPort(

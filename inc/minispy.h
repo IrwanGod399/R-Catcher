@@ -185,8 +185,10 @@ typedef struct _RECORD_LIST {
 typedef enum _MINISPY_COMMAND {
     GetMiniSpyLog,
     GetMiniSpyVersion,
-    COMMAND_CLEAR_TARGETS,  // <--- Tambahan Baru
-    COMMAND_ADD_TARGET      // <--- Tambahan Baru
+    COMMAND_CLEAR_TARGETS,      // <--- Tambahan Baru
+    COMMAND_ADD_TARGET,         // <--- Tambahan Baru
+    COMMAND_START_MONITORING,   // <--- Aktifkan proteksi kernel (dipicu tombol Start)
+    COMMAND_STOP_MONITORING     // <--- Matikan proteksi kernel (dipicu tombol Stop)
 } MINISPY_COMMAND;
 
 // Struktur pesan untuk mengirim target dari User ke Kernel

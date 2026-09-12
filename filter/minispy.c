@@ -28,6 +28,9 @@ NTSTATUS StatusToBreakOn = 0;
 
 LIST_ENTRY g_TargetListHead;
 FAST_MUTEX g_TargetListLock;
+
+// Flag proteksi kernel. FALSE saat driver baru dimuat (belum di-Start dari UI).
+volatile BOOLEAN g_MonitoringActive = FALSE;
 //---------------------------------------------------------------------------
 //  Function prototypes
 //---------------------------------------------------------------------------
@@ -510,6 +513,22 @@ Return Value:
                     status = GetExceptionCode();
                 }
                 break;
+
+            case COMMAND_START_MONITORING:
+                // Aktifkan proteksi: mulai memblokir/terminate proses yang menyentuh honeyfile.
+                g_MonitoringActive = TRUE;
+                DbgPrint("CoreSentinel: Monitoring AKTIF (proteksi ON).\n");
+                status = STATUS_SUCCESS;
+                break;
+
+            case COMMAND_STOP_MONITORING:
+                // Nonaktifkan proteksi (pause). Daftar target TIDAK dihapus,
+                // jadi Start berikutnya bisa mengaktifkan lagi tanpa Deploy ulang.
+                g_MonitoringActive = FALSE;
+                DbgPrint("CoreSentinel: Monitoring NONAKTIF (proteksi OFF).\n");
+                status = STATUS_SUCCESS;
+                break;
+
             case GetMiniSpyLog:
 
                 //
@@ -738,19 +757,24 @@ SpyPreOperationCallback(
 
             BOOLEAN isTargetFile = FALSE;
 
-            ExAcquireFastMutex(&g_TargetListLock);
-            if (!IsListEmpty(&g_TargetListHead)) {
-                PLIST_ENTRY entry = g_TargetListHead.Flink;
-                while (entry != &g_TargetListHead) {
-                    PTARGET_ENTRY targetItem = CONTAINING_RECORD(entry, TARGET_ENTRY, ListEntry);
-                    if (RtlCompareUnicodeString(&nameInfo->Name, &targetItem->FileName, TRUE) == 0) {
-                        isTargetFile = TRUE;
-                        break;
+            //  Proteksi hanya berjalan bila monitoring AKTIF (di-Start dari UI).
+            //  Kalau nonaktif (di-Stop), lewati pengecekan target sepenuhnya sehingga
+            //  tidak ada pemblokiran/terminate — daftar target tetap tersimpan.
+            if (g_MonitoringActive) {
+                ExAcquireFastMutex(&g_TargetListLock);
+                if (!IsListEmpty(&g_TargetListHead)) {
+                    PLIST_ENTRY entry = g_TargetListHead.Flink;
+                    while (entry != &g_TargetListHead) {
+                        PTARGET_ENTRY targetItem = CONTAINING_RECORD(entry, TARGET_ENTRY, ListEntry);
+                        if (RtlCompareUnicodeString(&nameInfo->Name, &targetItem->FileName, TRUE) == 0) {
+                            isTargetFile = TRUE;
+                            break;
+                        }
+                        entry = entry->Flink;
                     }
-                    entry = entry->Flink;
                 }
+                ExReleaseFastMutex(&g_TargetListLock);
             }
-            ExReleaseFastMutex(&g_TargetListLock);
 
             if (isTargetFile) {
 
@@ -837,19 +861,18 @@ SpyPreOperationCallback(
                 SpyLogPreOperationData(Data, FltObjects, recordList);
 
                 // 2. TITIK UBAH UTAMA: Tulis setelah SpyLogPreOperationData agar TIDAK tertimpa
-                // Format: "PID|ProcessName" (contoh: "14280|cmd.exe")
+                // ProcessName cukup berisi NAMA proses saja (mis. "cmd.exe").
+                // PID dikirim terpisah lewat field Data.ProcessId di bawah, yang dibaca UI
+                // dari offset tetap — jadi tidak perlu lagi format gabungan "PID|nama".
                 if (capturedName[0] != '\0') {
-                    RtlStringCbPrintfA(recordList->LogRecord.Data.ProcessName,
+                    RtlStringCbCopyA(recordList->LogRecord.Data.ProcessName,
                         sizeof(recordList->LogRecord.Data.ProcessName),
-                        "%u|%s",
-                        (ULONG)(ULONG_PTR)ProcessId,
                         capturedName);
                 }
                 else {
-                    RtlStringCbPrintfA(recordList->LogRecord.Data.ProcessName,
+                    RtlStringCbCopyA(recordList->LogRecord.Data.ProcessName,
                         sizeof(recordList->LogRecord.Data.ProcessName),
-                        "%u|<NoName>",
-                        (ULONG)(ULONG_PTR)ProcessId);
+                        "<NoName>");
                 }
 
                 recordList->LogRecord.Data.ProcessId = (ULONG_PTR)ProcessId;
